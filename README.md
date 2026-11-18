@@ -73,6 +73,11 @@ These are client-side Firebase configuration values, not server credentials.
 Do not put a reCAPTCHA secret key or any other private credential in the
 browser app.
 
+Notes are saved in this browser on this device and can be cleared with the
+Clear button. Without Firebase and reCAPTCHA configuration, the app remains in
+demo mode: note editing and local storage work, but AI summarization is
+unavailable.
+
 In the Firebase console:
 
 1. Register a Web app and enable Firebase AI Logic for the project.

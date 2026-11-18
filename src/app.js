@@ -13,6 +13,7 @@ import {
 import "./styles.css";
 
 const MAX_NOTE_LENGTH = 30000;
+const NOTES_STORAGE_KEY = "scribeedge-notes";
 const SAMPLE_NOTES = `Product sync — Tuesday
 
 We need to get the beta into 20 customer hands by the end of the month. Maya said onboarding is the biggest blocker: the first-run flow has too many steps, and two people dropped before connecting their workspace. She'll sketch a simpler version by Thursday.
@@ -48,34 +49,43 @@ const elements = {
   downloadButton: document.querySelector("#download-button")
 };
 
+const firebaseEnvironmentValues = [
+  import.meta.env.VITE_FIREBASE_API_KEY,
+  import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  import.meta.env.VITE_FIREBASE_APP_ID,
+  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY
+];
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "YOUR_API_KEY",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "YOUR_PROJECT.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "YOUR_PROJECT_ID",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "YOUR_PROJECT.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "YOUR_MESSAGING_SENDER_ID",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "YOUR_APP_ID"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "demo-api-key",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "demo.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "demo-project-id",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "demo.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "000000000000",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "demo-app-id"
 };
 const recaptchaSiteKey =
-  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY || "YOUR_RECAPTCHA_V3_SITE_KEY";
+  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY || "demo-recaptcha-v3-site-key";
 
 let model = null;
 let initializationError = null;
 let busy = false;
 
-function isConfigured() {
-  return Object.values(firebaseConfig).every(
-    (value) => value && !value.startsWith("YOUR_")
-  ) && recaptchaSiteKey && !recaptchaSiteKey.startsWith("YOUR_");
+function hasConfiguration() {
+  return firebaseEnvironmentValues.every(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
 }
 
-function setConnectionStatus(isConfigured) {
-  elements.connectionStatus.classList.toggle("needs-setup", !isConfigured);
-  elements.connectionLabel.textContent = isConfigured ? "AI configured" : "Setup needed";
+function setConnectionStatus(configured) {
+  elements.connectionStatus.classList.remove("needs-setup");
+  elements.connectionLabel.textContent = configured ? "AI configured" : "Demo mode";
 }
 
 function initializeFirebaseServices() {
-  if (!isConfigured()) {
+  if (!hasConfiguration()) {
     return;
   }
 
@@ -103,6 +113,29 @@ function initializeFirebaseServices() {
 function setInputMessage(message, kind = "") {
   elements.inputMessage.textContent = message;
   elements.inputMessage.className = `message-region${kind ? ` ${kind}` : ""}`;
+}
+
+function restoreNotesLocally() {
+  try {
+    elements.notes.value = window.localStorage.getItem(NOTES_STORAGE_KEY) || "";
+    return null;
+  } catch (error) {
+    console.error("[ScribeEdge] Could not restore notes from this device:", error);
+    return "Notes couldn't be loaded from this device.";
+  }
+}
+
+function saveNotesLocally() {
+  try {
+    if (elements.notes.value) {
+      window.localStorage.setItem(NOTES_STORAGE_KEY, elements.notes.value);
+    } else {
+      window.localStorage.removeItem(NOTES_STORAGE_KEY);
+    }
+  } catch (error) {
+    console.error("[ScribeEdge] Could not save notes on this device:", error);
+    setInputMessage("Notes couldn't be saved on this device.", "info");
+  }
 }
 
 function setBusy(nextBusy) {
@@ -189,7 +222,7 @@ export async function summarizeUserNotes(text) {
     throw new Error(
       initializationError
         ? `Firebase could not be initialized: ${errorMessage(initializationError)}`
-        : "Add your Firebase and reCAPTCHA values to .env.local, then restart the app."
+        : "AI summarization is unavailable in demo mode. Configure Firebase and reCAPTCHA to enable it."
     );
   }
 
@@ -260,15 +293,18 @@ async function handleSummarize() {
 }
 
 elements.notes.addEventListener("input", updateInputState);
+elements.notes.addEventListener("input", saveNotesLocally);
 elements.summarizeButton.addEventListener("click", handleSummarize);
 elements.sampleButton.addEventListener("click", () => {
   elements.notes.value = SAMPLE_NOTES;
   updateInputState();
+  saveNotesLocally();
   elements.notes.focus();
 });
 elements.clearButton.addEventListener("click", () => {
   elements.notes.value = "";
   updateInputState();
+  saveNotesLocally();
   elements.resultContent.hidden = true;
   elements.resultError.hidden = true;
   elements.inferenceBadge.hidden = true;
@@ -302,26 +338,32 @@ elements.downloadButton.addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
+const notesStorageError = restoreNotesLocally();
 updateInputState();
 elements.keyboardModifier.textContent = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 
+let startupMessage = "";
 try {
   initializeFirebaseServices();
   if (!model) {
     setConnectionStatus(false);
-    setInputMessage(
-      "Add your Firebase and reCAPTCHA values to .env.local, then restart the app.",
-      "info"
-    );
+    startupMessage =
+      "Demo mode: configure Firebase and reCAPTCHA to enable AI summarization. Notes are saved on this device.";
   }
 } catch (error) {
   initializationError = error;
   setConnectionStatus(false);
   console.error("[ScribeEdge] Firebase initialization failed:", error);
+  startupMessage = `Firebase could not be initialized; AI is unavailable. ${errorMessage(error)}`;
+}
+
+if (notesStorageError) {
   setInputMessage(
-    `Firebase setup needs attention: ${errorMessage(error)}`,
+    `${notesStorageError}${startupMessage ? ` ${startupMessage}` : ""}`,
     "info"
   );
+} else if (startupMessage) {
+  setInputMessage(startupMessage, "info");
 }
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
