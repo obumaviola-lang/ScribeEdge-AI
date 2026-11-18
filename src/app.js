@@ -49,34 +49,38 @@ const elements = {
   downloadButton: document.querySelector("#download-button")
 };
 
-const firebaseEnvironmentValues = [
-  import.meta.env.VITE_FIREBASE_API_KEY,
-  import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  import.meta.env.VITE_FIREBASE_APP_ID,
-  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY
-];
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "demo-api-key",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "demo.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "demo-project-id",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDSknqLYCy1vRPQ4DIp7VCar-1LQJ4VBLU",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "scribeedge-wordcraft-ai.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "scribeedge-wordcraft-ai",
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "demo.firebasestorage.app",
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "000000000000",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "demo-app-id"
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:220728371022:web:97e320be46d75dcd95e01f"
 };
 const recaptchaSiteKey =
-  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY || "demo-recaptcha-v3-site-key";
+  import.meta.env.VITE_RECAPTCHA_SITE_KEY ||
+  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY ||
+  "demo-site-key";
 
 let model = null;
 let initializationError = null;
 let busy = false;
 
-function hasConfiguration() {
-  return firebaseEnvironmentValues.every(
+function hasFirebaseConfiguration() {
+  return [
+    firebaseConfig.apiKey,
+    firebaseConfig.authDomain,
+    firebaseConfig.projectId,
+    firebaseConfig.appId
+  ].every(
     (value) => typeof value === "string" && value.trim().length > 0
   );
+}
+
+function hasRecaptchaConfiguration() {
+  return typeof recaptchaSiteKey === "string" &&
+    recaptchaSiteKey.trim().length > 0 &&
+    !/^(demo-|your[-_])/i.test(recaptchaSiteKey.trim());
 }
 
 function setConnectionStatus(configured) {
@@ -85,23 +89,25 @@ function setConnectionStatus(configured) {
 }
 
 function initializeFirebaseServices() {
-  if (!hasConfiguration()) {
+  if (!hasFirebaseConfiguration()) {
     return;
   }
 
   const app = initializeApp(firebaseConfig);
-  const isLocalhost =
-    import.meta.env.DEV &&
-    ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  if (hasRecaptchaConfiguration()) {
+    const isLocalhost =
+      import.meta.env.DEV &&
+      ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
 
-  if (isLocalhost) {
-    self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+    if (isLocalhost) {
+      self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+    }
+
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(recaptchaSiteKey),
+      isTokenAutoRefreshEnabled: true
+    });
   }
-
-  initializeAppCheck(app, {
-    provider: new ReCaptchaV3Provider(recaptchaSiteKey),
-    isTokenAutoRefreshEnabled: true
-  });
 
   const ai = getAI(app, { backend: new GoogleAIBackend() });
   model = getGenerativeModel(ai, {
@@ -349,6 +355,9 @@ try {
     setConnectionStatus(false);
     startupMessage =
       "Demo mode: configure Firebase and reCAPTCHA to enable AI summarization. Notes are saved on this device.";
+  } else if (!hasRecaptchaConfiguration()) {
+    startupMessage =
+      "Firebase AI is initialized, but App Check is not configured. Requests may be rejected if App Check enforcement is enabled.";
   }
 } catch (error) {
   initializationError = error;
