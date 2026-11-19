@@ -9,20 +9,25 @@ JavaScript and Firebase AI Logic.
 
 Notes often capture everything except what needs to happen next. ScribeEdge
 helps people move from unstructured information to useful follow-through while
-keeping private content on the device whenever possible. Notes are not saved
-by the application: they remain in the current page until you clear or leave
-it.
+keeping private content on the device whenever possible. Notes are saved in
+this browser on this device and can be removed with the Clear button.
+
+## Live app
+
+The app is hosted on [Lovable](https://scribeedge-wordcraft.lovable.app/).
 
 ## How it works
 
 1. Paste notes into the workspace and choose **Summarize with Hybrid AI**.
-2. The app initializes the browser's on-device model after the user action,
-   then asks Firebase AI Logic to summarize the text.
+2. With Firebase configured, the app initializes the browser's on-device model
+   after the user action, then asks Firebase AI Logic to summarize the text.
 3. With `InferenceMode.PREFER_ON_DEVICE`, Firebase uses Chrome's on-device
    Prompt API when it is available and ready. Otherwise, Firebase routes the
    request to its configured cloud model.
 4. The response's `inferenceSource` is logged in the browser console and shown
    in the result badge as **On-device** or **Cloud**.
+5. Without Firebase configuration, Chrome's Built-in AI `LanguageModel` API is
+   used directly when available; this mode stays on-device.
 
 The app also caches its production app shell with a service worker. After the
 first successful visit, the interface can load offline; on-device inference
@@ -57,7 +62,9 @@ npm install
 ```
 
 Copy `.env.example` to `.env.local` and fill in the Firebase Web app settings
-and reCAPTCHA v3 site key:
+and reCAPTCHA v3 site key for local development. For the hosted Lovable app,
+set the same `VITE_*` values in the Lovable project's environment settings and
+redeploy:
 
 ```dotenv
 VITE_FIREBASE_API_KEY=your-api-key
@@ -66,24 +73,28 @@ VITE_FIREBASE_PROJECT_ID=your-project-id
 VITE_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
 VITE_FIREBASE_MESSAGING_SENDER_ID=your-sender-id
 VITE_FIREBASE_APP_ID=your-app-id
-VITE_RECAPTCHA_V3_SITE_KEY=your-recaptcha-v3-site-key
+VITE_RECAPTCHA_SITE_KEY=your-recaptcha-v3-site-key
 ```
 
 These are client-side Firebase configuration values, not server credentials.
 Do not put a reCAPTCHA secret key or any other private credential in the
 browser app.
+The app can run Firebase AI without a reCAPTCHA site key, but App Check won't
+be initialized. Replace the demo placeholder and enable App Check before
+enforcing it in production.
 
 Notes are saved in this browser on this device and can be cleared with the
-Clear button. Without Firebase and reCAPTCHA configuration, the app remains in
-demo mode: note editing and local storage work, but AI summarization is
-unavailable.
+Clear button. Firebase and reCAPTCHA configuration are optional for local
+development. Without Firebase, the app uses Chrome Built-in AI when available;
+otherwise, note editing and local storage still work in demo mode.
 
 In the Firebase console:
 
 1. Register a Web app and enable Firebase AI Logic for the project.
 2. Register the reCAPTCHA v3 site key with Firebase App Check, and enable App
    Check enforcement for Firebase AI Logic before releasing the app.
-3. Add your production domain to the reCAPTCHA site's allowed domains.
+3. Add `scribeedge-wordcraft.lovable.app` to the reCAPTCHA site's allowed
+   domains.
 
 ### Run locally
 
@@ -109,11 +120,11 @@ the service worker and production App Check provider.
 
 ## Privacy and production notes
 
-- Notes and generated summaries are kept in page memory only; there is no
-  application database or browser-storage persistence.
+- Notes are saved in this browser's local storage; generated summaries remain
+  in page memory only. There is no application database or cloud note storage.
 - On-device requests stay on the device. When the local model is unavailable
-  or not ready, the hybrid SDK can send note text to the configured cloud
-  model. The inference badge identifies which route handled the response.
+  or not ready, Firebase's hybrid SDK can send note text to the configured
+  cloud model. The inference badge identifies which route handled the response.
 - Configure and enforce Firebase App Check for production. The development
   debug token is not a production attestation provider.
 - This project does not include authentication or server-side authorization;
