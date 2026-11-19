@@ -266,7 +266,27 @@ ${notes}
     summary = result.response.text().trim();
     source = result.response.inferenceSource;
   } else if (nativeLanguageModel) {
+    const languageModelOptions = {
+      expectedInputs: [{ type: "text", languages: ["en"] }],
+      expectedOutputs: [{ type: "text", languages: ["en"] }]
+    };
+    const availability =
+      await nativeLanguageModel.availability(languageModelOptions);
+
+    if (availability === "unavailable") {
+      throw new Error(
+        "Chrome Built-in AI is unavailable. Configure Firebase AI or try again later."
+      );
+    }
+    if (availability === "downloadable") {
+      elements.loadingDetail.textContent = "Downloading Chrome Built-in AI model…";
+    } else if (availability === "downloading") {
+      elements.loadingDetail.textContent =
+        "Chrome Built-in AI model is already downloading…";
+    }
+
     const session = await nativeLanguageModel.create({
+      ...languageModelOptions,
       monitor(monitor) {
         monitor.addEventListener("downloadprogress", (event) => {
           if (event.total > 0) {
