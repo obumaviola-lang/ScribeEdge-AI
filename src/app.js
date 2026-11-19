@@ -50,19 +50,20 @@ const elements = {
 };
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDSknqLYCy1vRPQ4DIp7VCar-1LQJ4VBLU",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "scribeedge-wordcraft-ai.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "scribeedge-wordcraft-ai",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "demo.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "000000000000",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:220728371022:web:97e320be46d75dcd95e01f"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 const recaptchaSiteKey =
   import.meta.env.VITE_RECAPTCHA_SITE_KEY ||
   import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY ||
-  "demo-site-key";
+  "";
 
 let model = null;
+const nativeLanguageModel = globalThis.LanguageModel;
 let initializationError = null;
 let busy = false;
 
@@ -224,14 +225,6 @@ function errorMessage(error) {
 }
 
 export async function summarizeUserNotes(text) {
-  if (!model) {
-    throw new Error(
-      initializationError
-        ? `Firebase could not be initialized: ${errorMessage(initializationError)}`
-        : "AI summarization is unavailable in demo mode. Configure Firebase and reCAPTCHA to enable it."
-    );
-  }
-
   const notes = text.trim();
   if (!notes) {
     throw new Error("Add some notes before asking for a summary.");
@@ -259,22 +252,51 @@ Notes:
 ${notes}
 """`;
 
-  model.initializeDeviceModel((progress) => {
-    elements.loadingDetail.textContent =
-      `Preparing on-device model · ${Math.round(progress * 100)}%`;
-  }).catch((error) => {
-    console.warn("[ScribeEdge] On-device model initialization failed:", error);
-  });
+  let summary;
+  let source;
+  if (model) {
+    model.initializeDeviceModel((progress) => {
+      elements.loadingDetail.textContent =
+        `Preparing on-device model · ${Math.round(progress * 100)}%`;
+    }).catch((error) => {
+      console.warn("[ScribeEdge] On-device model initialization failed:", error);
+    });
 
-  const result = await model.generateContent(prompt);
-  const response = result.response;
-  const summary = response.text().trim();
+    const result = await model.generateContent(prompt);
+    summary = result.response.text().trim();
+    source = result.response.inferenceSource;
+  } else if (nativeLanguageModel) {
+    const session = await nativeLanguageModel.create({
+      monitor(monitor) {
+        monitor.addEventListener("downloadprogress", (event) => {
+          if (event.total > 0) {
+            const progress = Math.round((event.loaded / event.total) * 100);
+            elements.loadingDetail.textContent =
+              `Preparing on-device model · ${progress}%`;
+          }
+        });
+      }
+    });
+
+    try {
+      summary = (await session.prompt(prompt)).trim();
+    } finally {
+      session.destroy();
+    }
+    source = InferenceSource.ON_DEVICE;
+  } else {
+    const details = initializationError
+      ? ` Firebase initialization failed: ${errorMessage(initializationError)}`
+      : "";
+    throw new Error(
+      `AI summarization is unavailable. Configure Firebase or use Chrome with Built-in AI enabled.${details}`
+    );
+  }
 
   if (!summary) {
     throw new Error("The model returned an empty summary. Please try again.");
   }
 
-  const source = response.inferenceSource;
   console.info("[ScribeEdge] Inference source:", source);
   return { summary, source };
 }
@@ -353,8 +375,9 @@ try {
   initializeFirebaseServices();
   if (!model) {
     setConnectionStatus(false);
-    startupMessage =
-      "Demo mode: configure Firebase and reCAPTCHA to enable AI summarization. Notes are saved on this device.";
+    startupMessage = nativeLanguageModel
+      ? "Firebase is not configured. Chrome Built-in AI can summarize on-device when available; notes are saved on this device."
+      : "Demo mode: configure Firebase AI or use Chrome with Built-in AI enabled to summarize. Notes are saved on this device.";
   } else if (!hasRecaptchaConfiguration()) {
     startupMessage =
       "Firebase AI is initialized, but App Check is not configured. Requests may be rejected if App Check enforcement is enabled.";
@@ -363,7 +386,9 @@ try {
   initializationError = error;
   setConnectionStatus(false);
   console.error("[ScribeEdge] Firebase initialization failed:", error);
-  startupMessage = `Firebase could not be initialized; AI is unavailable. ${errorMessage(error)}`;
+  startupMessage = nativeLanguageModel
+    ? `Firebase could not be initialized; Chrome Built-in AI can still be used. ${errorMessage(error)}`
+    : `Firebase could not be initialized; AI is unavailable. ${errorMessage(error)}`;
 }
 
 if (notesStorageError) {
