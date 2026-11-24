@@ -1,19 +1,9 @@
-import { initializeApp } from "firebase/app";
-import {
-  initializeAppCheck,
-  ReCaptchaV3Provider
-} from "firebase/app-check";
-import {
-  getAI,
-  getGenerativeModel,
-  GoogleAIBackend,
-  InferenceMode,
-  InferenceSource
-} from "firebase/ai";
+import { initializeFirebaseAI } from "./lib/firebase.ts";
 import "./styles.css";
 
 const MAX_NOTE_LENGTH = 30000;
 const NOTES_STORAGE_KEY = "scribeedge-notes";
+const TAKEAWAY_STORAGE_KEY = "scribeedge-takeaway";
 const SAMPLE_NOTES = `Product sync — Tuesday
 
 We need to get the beta into 20 customer hands by the end of the month. Maya said onboarding is the biggest blocker: the first-run flow has too many steps, and two people dropped before connecting their workspace. She'll sketch a simpler version by Thursday.
@@ -49,72 +39,17 @@ const elements = {
   downloadButton: document.querySelector("#download-button")
 };
 
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
-};
-const recaptchaSiteKey =
-  import.meta.env.VITE_RECAPTCHA_SITE_KEY ||
-  import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY ||
-  "";
-
 let model = null;
 const nativeLanguageModel = globalThis.LanguageModel;
 let initializationError = null;
+let firebaseConfigured = false;
+let appCheckEnabled = false;
 let busy = false;
-
-function hasFirebaseConfiguration() {
-  return [
-    firebaseConfig.apiKey,
-    firebaseConfig.authDomain,
-    firebaseConfig.projectId,
-    firebaseConfig.appId
-  ].every(
-    (value) => typeof value === "string" && value.trim().length > 0
-  );
-}
-
-function hasRecaptchaConfiguration() {
-  return typeof recaptchaSiteKey === "string" &&
-    recaptchaSiteKey.trim().length > 0 &&
-    !/^(demo-|your[-_])/i.test(recaptchaSiteKey.trim());
-}
+let hasSavedTakeaway = false;
 
 function setConnectionStatus(configured) {
   elements.connectionStatus.classList.remove("needs-setup");
   elements.connectionLabel.textContent = configured ? "AI configured" : "Demo mode";
-}
-
-function initializeFirebaseServices() {
-  if (!hasFirebaseConfiguration()) {
-    return;
-  }
-
-  const app = initializeApp(firebaseConfig);
-  if (hasRecaptchaConfiguration()) {
-    const isLocalhost =
-      import.meta.env.DEV &&
-      ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-
-    if (isLocalhost) {
-      self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
-    }
-
-    initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(recaptchaSiteKey),
-      isTokenAutoRefreshEnabled: true
-    });
-  }
-
-  const ai = getAI(app, { backend: new GoogleAIBackend() });
-  model = getGenerativeModel(ai, {
-    mode: InferenceMode.PREFER_ON_DEVICE
-  });
-  setConnectionStatus(true);
 }
 
 function setInputMessage(message, kind = "") {
@@ -145,12 +80,125 @@ function saveNotesLocally() {
   }
 }
 
+function parseTakeawaySections(content) {
+  const sections = {
+    summary: [],
+    decisions: [],
+    actionItems: [],
+    openQuestions: []
+  };
+  let currentSection = "";
+
+  for (const line of content.split(/\r?\n/)) {
+    const header = line.trim()
+      .replace(/^#+\s*/, "")
+      .replace(/[*_`]/g, "")
+      .replace(/:\s*$/, "")
+      .toUpperCase();
+
+    if (header === "SUMMARY") {
+      currentSection = "summary";
+    } else if (header === "DECISIONS") {
+      currentSection = "decisions";
+    } else if (header === "ACTION ITEMS") {
+      currentSection = "actionItems";
+    } else if (header === "OPEN QUESTIONS") {
+      currentSection = "openQuestions";
+    } else if (currentSection) {
+      sections[currentSection].push(line);
+    }
+  }
+
+  return {
+    summary: sections.summary.join("\n").trim() || content.trim(),
+    decisions: sections.decisions.join("\n").trim(),
+    actionItems: sections.actionItems.join("\n").trim(),
+    openQuestions: sections.openQuestions.join("\n").trim()
+  };
+}
+
+function createTakeawayResult(content, modeLabel) {
+  return {
+    ...parseTakeawaySections(content),
+    content,
+    modeLabel,
+    timestamp: new Date().toISOString()
+  };
+}
+
+function isTakeawayResult(value) {
+  return value !== null &&
+    typeof value === "object" &&
+    typeof value.summary === "string" &&
+    typeof value.decisions === "string" &&
+    typeof value.actionItems === "string" &&
+    typeof value.openQuestions === "string" &&
+    typeof value.content === "string" &&
+    ["On-device", "Cloud AI", "Cloud", "Demo"].includes(value.modeLabel) &&
+    typeof value.timestamp === "string" &&
+    Number.isFinite(Date.parse(value.timestamp));
+}
+
+function restoreTakeawayLocally() {
+  try {
+    const storedTakeaway = window.localStorage.getItem(TAKEAWAY_STORAGE_KEY);
+    if (!storedTakeaway) {
+      return { takeaway: null, error: null };
+    }
+
+    const takeaway = JSON.parse(storedTakeaway);
+    if (!isTakeawayResult(takeaway)) {
+      console.warn("[ScribeEdge] Saved takeaway has an invalid format.");
+      window.localStorage.removeItem(TAKEAWAY_STORAGE_KEY);
+      return {
+        takeaway: null,
+        error: "The saved takeaway was invalid and has been removed."
+      };
+    }
+
+    hasSavedTakeaway = true;
+    return { takeaway, error: null };
+  } catch (error) {
+    console.error("[ScribeEdge] Could not restore the takeaway from this device:", error);
+    return {
+      takeaway: null,
+      error: "The last takeaway couldn't be loaded from this device."
+    };
+  }
+}
+
+function saveTakeawayLocally(takeaway) {
+  try {
+    window.localStorage.setItem(
+      TAKEAWAY_STORAGE_KEY,
+      JSON.stringify(takeaway)
+    );
+    hasSavedTakeaway = true;
+    return null;
+  } catch (error) {
+    console.error("[ScribeEdge] Could not save the takeaway on this device:", error);
+    return "The takeaway couldn't be saved on this device.";
+  }
+}
+
+function clearTakeawayLocally() {
+  try {
+    window.localStorage.removeItem(TAKEAWAY_STORAGE_KEY);
+    hasSavedTakeaway = false;
+    return null;
+  } catch (error) {
+    console.error("[ScribeEdge] Could not clear the takeaway from this device:", error);
+    return "The saved takeaway couldn't be cleared from this device.";
+  }
+}
+
 function setBusy(nextBusy) {
   busy = nextBusy;
   elements.notes.disabled = busy;
   elements.summarizeButton.disabled = busy || !elements.notes.value.trim();
   elements.summarizeButton.classList.toggle("is-loading", busy);
-  elements.clearButton.disabled = busy || !elements.notes.value;
+  elements.clearButton.disabled =
+    busy || (!elements.notes.value && !hasSavedTakeaway);
   elements.sampleButton.disabled = busy;
 
   if (busy) {
@@ -171,7 +219,7 @@ function updateInputState() {
   const length = elements.notes.value.length;
   elements.characterCount.textContent =
     `${length.toLocaleString()} / ${MAX_NOTE_LENGTH.toLocaleString()}`;
-  elements.clearButton.disabled = busy || length === 0;
+  elements.clearButton.disabled = busy || (length === 0 && !hasSavedTakeaway);
   elements.summarizeButton.disabled = busy || !elements.notes.value.trim();
   elements.resultLoading.hidden = true;
   elements.resultContent.hidden = true;
@@ -200,20 +248,20 @@ function showError(message) {
   elements.resultError.hidden = false;
 }
 
-function showSummary(text, source) {
+function showSummary(takeaway) {
   elements.resultLoading.hidden = true;
   elements.resultError.hidden = true;
   elements.resultEmpty.hidden = true;
   elements.resultContent.hidden = false;
-  elements.summaryText.textContent = text;
+  elements.summaryText.textContent = takeaway.content;
   elements.resultTimestamp.textContent = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit"
-  }).format(new Date());
+  }).format(new Date(takeaway.timestamp));
 
-  const usedOnDevice = source === InferenceSource.ON_DEVICE;
+  const usedOnDevice = takeaway.modeLabel === "On-device";
   elements.inferenceBadge.classList.toggle("cloud", !usedOnDevice);
-  elements.inferenceLabel.textContent = usedOnDevice ? "On-device" : "Cloud";
+  elements.inferenceLabel.textContent = takeaway.modeLabel;
   elements.inferenceBadge.hidden = false;
 }
 
@@ -252,73 +300,100 @@ Notes:
 ${notes}
 """`;
 
-  let summary;
-  let source;
-  if (model) {
-    model.initializeDeviceModel((progress) => {
-      elements.loadingDetail.textContent =
-        `Preparing on-device model · ${Math.round(progress * 100)}%`;
-    }).catch((error) => {
-      console.warn("[ScribeEdge] On-device model initialization failed:", error);
-    });
-
-    const result = await model.generateContent(prompt);
-    summary = result.response.text().trim();
-    source = result.response.inferenceSource;
-  } else if (nativeLanguageModel) {
+  if (nativeLanguageModel) {
     const languageModelOptions = {
       expectedInputs: [{ type: "text", languages: ["en"] }],
       expectedOutputs: [{ type: "text", languages: ["en"] }]
     };
-    const availability =
-      await nativeLanguageModel.availability(languageModelOptions);
+    try {
+      const availability =
+        await nativeLanguageModel.availability(languageModelOptions);
+      if (availability !== "unavailable") {
+        if (availability === "downloadable") {
+          elements.loadingDetail.textContent = "Downloading Chrome Built-in AI model…";
+        } else if (availability === "downloading") {
+          elements.loadingDetail.textContent =
+            "Chrome Built-in AI model is already downloading…";
+        }
 
-    if (availability === "unavailable") {
-      throw new Error(
-        "Chrome Built-in AI is unavailable. Configure Firebase AI or try again later."
-      );
-    }
-    if (availability === "downloadable") {
-      elements.loadingDetail.textContent = "Downloading Chrome Built-in AI model…";
-    } else if (availability === "downloading") {
-      elements.loadingDetail.textContent =
-        "Chrome Built-in AI model is already downloading…";
-    }
-
-    const session = await nativeLanguageModel.create({
-      ...languageModelOptions,
-      monitor(monitor) {
-        monitor.addEventListener("downloadprogress", (event) => {
-          if (event.total > 0) {
-            const progress = Math.round((event.loaded / event.total) * 100);
-            elements.loadingDetail.textContent =
-              `Preparing on-device model · ${progress}%`;
+        const session = await nativeLanguageModel.create({
+          ...languageModelOptions,
+          monitor(monitor) {
+            monitor.addEventListener("downloadprogress", (event) => {
+              if (event.total > 0) {
+                const progress = Math.round((event.loaded / event.total) * 100);
+                elements.loadingDetail.textContent =
+                  `Preparing on-device model · ${progress}%`;
+              }
+            });
           }
         });
+
+        try {
+          const summary = (await session.prompt(prompt)).trim();
+          if (summary) {
+            return { summary, modeLabel: "On-device" };
+          }
+          throw new Error("Chrome Built-in AI returned an empty summary.");
+        } finally {
+          session.destroy();
+        }
       }
-    });
-
-    try {
-      summary = (await session.prompt(prompt)).trim();
-    } finally {
-      session.destroy();
+    } catch (error) {
+      console.warn("[ScribeEdge] On-device summarization failed; trying cloud fallback:", error);
     }
-    source = InferenceSource.ON_DEVICE;
-  } else {
-    const details = initializationError
-      ? ` Firebase initialization failed: ${errorMessage(initializationError)}`
-      : "";
-    throw new Error(
-      `AI summarization is unavailable. Configure Firebase or use Chrome with Built-in AI enabled.${details}`
-    );
   }
 
-  if (!summary) {
-    throw new Error("The model returned an empty summary. Please try again.");
+  if (model) {
+    try {
+      elements.loadingDetail.textContent = "Using Firebase AI Logic cloud fallback";
+      const result = await model.generateContent(prompt);
+      const summary = result.response.text().trim();
+      if (summary) {
+        return { summary, modeLabel: "Cloud AI" };
+      }
+      throw new Error("Firebase AI Logic returned an empty summary.");
+    } catch (error) {
+      console.warn("[ScribeEdge] Firebase cloud summarization failed; using demo fallback:", error);
+    }
   }
 
-  console.info("[ScribeEdge] Inference source:", source);
-  return { summary, source };
+  const lines = notes.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const decisions = lines
+    .filter((line) => /^(?:[-*]\s*)?(?:decision|decided|we agreed|agreed to)\b/i.test(line))
+    .map((line) => line.replace(/^(?:[-*]\s*)?(?:decision|decided)\s*:?\s*/i, ""));
+  const actionItems = lines
+    .filter((line) => /^(?:[-*]\s*)?(?:action item|todo|task)\b/i.test(line) ||
+      /\b(?:will|must|needs? to|should|follow up|send|schedule)\b/i.test(line))
+    .filter((line) => !decisions.includes(line));
+  const openQuestions = lines
+    .filter((line) => /\?\s*$/.test(line) ||
+      /^(?:[-*]\s*)?(?:open question|question)\b/i.test(line))
+    .map((line) => line.replace(/^(?:[-*]\s*)?(?:open question|question)\s*:?\s*/i, ""));
+  const contextLines = lines.filter((line) =>
+    !/^(?:[-*]\s*)?(?:decision|decided|we agreed|agreed to|action item|todo|task)\b/i.test(line) &&
+    !/\?\s*$/.test(line) &&
+    !/^(?:[-*]\s*)?(?:open question|question)\b/i.test(line)
+  );
+  const summary = contextLines.slice(0, 2).join(" ").slice(0, 400) ||
+    "Notes were provided, but no summary details could be extracted.";
+  const bullets = (items) => items.length
+    ? items.map((item) => `- ${item}`).join("\n")
+    : "- None noted.";
+  const demoSummary = [
+    "SUMMARY",
+    summary,
+    "",
+    "DECISIONS",
+    bullets(decisions),
+    "",
+    "ACTION ITEMS",
+    bullets(actionItems),
+    "",
+    "OPEN QUESTIONS",
+    bullets(openQuestions)
+  ].join("\n");
+  return { summary: demoSummary, modeLabel: "Demo" };
 }
 
 async function handleSummarize() {
@@ -329,8 +404,13 @@ async function handleSummarize() {
   showLoading("Finding the signal...", "Preparing hybrid inference");
 
   try {
-    const { summary, source } = await summarizeUserNotes(elements.notes.value);
-    showSummary(summary, source);
+    const { summary, modeLabel } = await summarizeUserNotes(elements.notes.value);
+    const takeaway = createTakeawayResult(summary, modeLabel);
+    showSummary(takeaway);
+    const storageError = saveTakeawayLocally(takeaway);
+    if (storageError) {
+      setInputMessage(storageError, "info");
+    }
   } catch (error) {
     const message = errorMessage(error);
     console.error("[ScribeEdge] Summarization failed:", error);
@@ -353,6 +433,12 @@ elements.clearButton.addEventListener("click", () => {
   elements.notes.value = "";
   updateInputState();
   saveNotesLocally();
+  const takeawayClearError = clearTakeawayLocally();
+  elements.clearButton.disabled =
+    busy || (!elements.notes.value && !hasSavedTakeaway);
+  if (takeawayClearError) {
+    setInputMessage(takeawayClearError, "info");
+  }
   elements.resultContent.hidden = true;
   elements.resultError.hidden = true;
   elements.inferenceBadge.hidden = true;
@@ -387,37 +473,51 @@ elements.downloadButton.addEventListener("click", () => {
 });
 
 const notesStorageError = restoreNotesLocally();
+const {
+  takeaway: savedTakeaway,
+  error: takeawayStorageError
+} = restoreTakeawayLocally();
 updateInputState();
+if (savedTakeaway) {
+  showSummary(savedTakeaway);
+}
 elements.keyboardModifier.textContent = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 
 let startupMessage = "";
 try {
-  initializeFirebaseServices();
-  if (!model) {
+  const firebase = initializeFirebaseAI();
+  model = firebase.model;
+  firebaseConfigured = firebase.configured;
+  appCheckEnabled = firebase.appCheckEnabled;
+  initializationError = firebase.error;
+  if (initializationError) {
+    throw initializationError;
+  }
+  setConnectionStatus(firebaseConfigured);
+  if (!firebaseConfigured) {
     setConnectionStatus(false);
-    startupMessage = nativeLanguageModel
-      ? "Firebase is not configured. Chrome Built-in AI can summarize on-device when available; notes are saved on this device."
-      : "Demo mode: configure Firebase AI or use Chrome with Built-in AI enabled to summarize. Notes are saved on this device.";
-  } else if (!hasRecaptchaConfiguration()) {
+    startupMessage = "Firebase isn't configured. Summaries use Chrome Built-in AI when available, otherwise the local Demo fallback.";
+  } else if (!appCheckEnabled) {
     startupMessage =
-      "Firebase AI is initialized, but App Check is not configured. Requests may be rejected if App Check enforcement is enabled.";
+      "Firebase AI is ready, but App Check isn't configured. Cloud requests may be rejected if App Check enforcement is enabled.";
   }
 } catch (error) {
   initializationError = error;
+  firebaseConfigured = false;
+  model = null;
   setConnectionStatus(false);
   console.error("[ScribeEdge] Firebase initialization failed:", error);
-  startupMessage = nativeLanguageModel
-    ? `Firebase could not be initialized; Chrome Built-in AI can still be used. ${errorMessage(error)}`
-    : `Firebase could not be initialized; AI is unavailable. ${errorMessage(error)}`;
+  startupMessage =
+    `Firebase could not be initialized; the app will use Chrome Built-in AI or the local Demo fallback. ${errorMessage(error)}`;
 }
 
-if (notesStorageError) {
-  setInputMessage(
-    `${notesStorageError}${startupMessage ? ` ${startupMessage}` : ""}`,
-    "info"
-  );
-} else if (startupMessage) {
-  setInputMessage(startupMessage, "info");
+const startupMessages = [
+  notesStorageError,
+  takeawayStorageError,
+  startupMessage
+].filter(Boolean);
+if (startupMessages.length) {
+  setInputMessage(startupMessages.join(" "), "info");
 }
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
